@@ -12,9 +12,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     Message,
-    CallbackQuery,
-    Chat,
-    User
+    CallbackQuery
 )
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter, TelegramAPIError
@@ -34,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота - БЕЗ HTML
+# Инициализация бота
 bot = Bot(
     token=config.BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=None)
@@ -84,34 +82,14 @@ def get_media_data(message: Message):
     
     return media_type, media_data
 
-async def safe_send_message(chat_id: int, text: str, **kwargs):
-    """Безопасная отправка сообщения с проверкой"""
+async def safe_send_message(chat_id: int, text: str, reply_markup=None):
+    """Безопасная отправка сообщения"""
     try:
-        # Проверяем, что чат - не бот (через get_chat_member)
-        try:
-            # Пробуем получить информацию о пользователе
-            chat = await bot.get_chat(chat_id)
-            
-            # Проверяем тип чата
-            if chat.type == 'private':
-                # Для приватных чатов пытаемся получить информацию о пользователе
-                try:
-                    # Используем другой метод для проверки
-                    member = await bot.get_chat_member(chat_id, chat_id)
-                    if member.user and member.user.is_bot:
-                        logger.warning(f"Попытка отправить сообщение боту {chat_id} - пропускаем")
-                        return None
-                except Exception as e:
-                    # Если не можем получить информацию, пробуем отправить
-                    pass
-        except Exception as e:
-            logger.warning(f"Не удалось проверить чат {chat_id}: {e}")
-        
-        return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
-        return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
     except TelegramAPIError as e:
         if "can't send messages to the bot" in str(e):
             logger.warning(f"Нельзя отправлять сообщения ботам: {chat_id}")
@@ -119,19 +97,21 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
         logger.error(f"Ошибка отправки: {e}")
         return None
 
-def is_bot_user(user_id: int) -> bool:
-    """Простая проверка - боты обычно имеют username заканчивающийся на 'bot'"""
-    # Это не надежно, но работает как fallback
-    return False
+async def safe_edit_message(text: str, message: Message, reply_markup=None):
+    """Безопасное редактирование сообщения"""
+    try:
+        return await message.edit_text(text, parse_mode=None, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Ошибка редактирования: {e}")
+        return None
 
-# ==================== ОБРАБОТЧИКИ ====================
+# ==================== ОБРАБОТЧИКИ BUSINESS API ====================
 
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     try:
         user_id = connection.user.id
         
-        # Проверяем, что пользователь - не бот
         if connection.user.is_bot:
             logger.warning(f"Бот пытается подключиться: {user_id}")
             return
@@ -187,7 +167,6 @@ async def handle_business_message(message: Message):
         if not user_id:
             return
         
-        # Пропускаем сообщения от ботов
         if message.from_user and message.from_user.is_bot:
             logger.info(f"Пропущено сообщение от бота {user_id}")
             return
@@ -224,7 +203,6 @@ async def handle_edited_business_message(message: Message):
         if not user_id:
             return
         
-        # Пропускаем сообщения от ботов
         if message.from_user and message.from_user.is_bot:
             return
         
@@ -251,8 +229,6 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
     try:
         user_id = message.chat.id
         
-        # Проверяем, что пользователь - не бот через простой способ
-        # Пропускаем если ID похож на бота (обычно боты имеют ID начинающийся с 5)
         if str(user_id).startswith('5') and len(str(user_id)) >= 10:
             logger.info(f"Пропущено удаление от бота {user_id}")
             return
@@ -280,7 +256,6 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, что пользователь - не бот
     if message.from_user.is_bot:
         await message.answer("❌ Боты не могут использовать этого бота.")
         return
@@ -302,15 +277,21 @@ async def cmd_start(message: Message):
         f"✅ Сохранять сообщения\n"
         f"✏️ Отслеживать изменения\n"
         f"🗑️ Сохранять удаленные\n\n"
-        f"🔥 Требуется Telegram Premium",
+        f"🔥 Требуется Telegram Premium\n\n"
+        f"Нажмите на кнопку ниже, чтобы перейти в меню:",
         reply_markup=kb
     )
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    # Проверяем, что пользователь - не бот
     if message.from_user.is_bot:
         return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
     
     await safe_send_message(
         message.from_user.id,
@@ -323,14 +304,14 @@ async def cmd_help(message: Message):
         f"🔌 Как подключить:\n"
         f"1. Купите Telegram Premium\n"
         f"2. Настройки → Telegram Business → Боты\n"
-        f"3. Добавьте бота"
+        f"3. Добавьте бота",
+        reply_markup=kb
     )
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, что пользователь - не бот
     if message.from_user.is_bot:
         return
     
@@ -348,13 +329,16 @@ async def cmd_stats(message: Message):
     text += f"📎 Медиа: {stats[3]}\n"
     text += f"🔗 Чатов: {connections}"
     
-    await safe_send_message(user_id, text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+    ])
+    
+    await safe_send_message(user_id, text, reply_markup=kb)
 
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, что пользователь - не бот
     if message.from_user.is_bot:
         return
     
@@ -375,16 +359,16 @@ async def cmd_settings(message: Message):
         [InlineKeyboardButton(
             text=f"{'✅' if settings[2] else '❌'} Медиа",
             callback_data="toggle_media"
-        )]
+        )],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
     ])
     
-    await safe_send_message(user_id, "⚙️ Настройки", reply_markup=kb)
+    await safe_send_message(user_id, "⚙️ Настройки\n\nВыберите что хотите настроить:", reply_markup=kb)
 
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, что пользователь - не бот
     if message.from_user.is_bot:
         return
     
@@ -418,48 +402,58 @@ async def cmd_history(message: Message):
                 text += f"• {datetime.fromtimestamp(edit_d).strftime('%H:%M')}\n"
                 text += f"  Было: {old_t[:50]}{'...' if len(old_t) > 50 else ''}\n"
         
-        await safe_send_message(user_id, text)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        ])
+        
+        await safe_send_message(user_id, text, reply_markup=kb)
     except ValueError:
         await safe_send_message(user_id, "❌ ID должен быть числом")
 
 # ==================== CALLBACKS ====================
 
-@dp.callback_query()
-async def handle_callbacks(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    
-    # Проверяем, что пользователь - не бот
-    if callback.from_user.is_bot:
-        await callback.answer("❌ Боты не могут использовать этого бота.")
-        return
-    
-    if callback.data == "stats":
-        await cmd_stats(callback.message)
-    elif callback.data == "settings":
-        await cmd_settings(callback.message)
-    elif callback.data == "help":
-        await cmd_help(callback.message)
-    elif callback.data.startswith("toggle_"):
-        setting = callback.data.replace("toggle_", "")
-        settings = await db.get_user_settings(user_id)
-        
-        if not settings:
-            settings = [1, 1, 1]
-        
-        setting_map = {
-            "deleted": (0, "notify_deleted"),
-            "edited": (1, "notify_edited"),
-            "media": (2, "save_media")
-        }
-        
-        if setting in setting_map:
-            index, db_field = setting_map[setting]
-            new_value = 0 if settings[index] == 1 else 1
-            await db.update_user_settings(user_id, **{db_field: new_value})
-            await callback.answer("✅ Обновлено!")
-            await cmd_settings(callback.message)
-    
+@dp.callback_query(F.data == "stats")
+async def callback_stats(callback: CallbackQuery):
     await callback.answer()
+    await cmd_stats(callback.message)
+
+@dp.callback_query(F.data == "settings")
+async def callback_settings(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_settings(callback.message)
+
+@dp.callback_query(F.data == "help")
+async def callback_help(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_help(callback.message)
+
+@dp.callback_query(F.data == "start")
+async def callback_start(callback: CallbackQuery):
+    await callback.answer()
+    await cmd_start(callback.message)
+
+@dp.callback_query(F.data.startswith("toggle_"))
+async def callback_toggle(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    setting = callback.data.replace("toggle_", "")
+    
+    settings = await db.get_user_settings(user_id)
+    if not settings:
+        settings = [1, 1, 1]
+    
+    setting_map = {
+        "deleted": (0, "notify_deleted"),
+        "edited": (1, "notify_edited"),
+        "media": (2, "save_media")
+    }
+    
+    if setting in setting_map:
+        index, db_field = setting_map[setting]
+        new_value = 0 if settings[index] == 1 else 1
+        await db.update_user_settings(user_id, **{db_field: new_value})
+        
+        await callback.answer(f"✅ {'Включено' if new_value else 'Выключено'}!")
+        await cmd_settings(callback.message)
 
 # ==================== ЗАПУСК ====================
 
