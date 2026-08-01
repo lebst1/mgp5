@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
+# Инициализация бота - ПЕРЕНОСИМ parse_mode в DefaultBotProperties
 bot = Bot(
     token=config.BOT_TOKEN,
     default=DefaultBotProperties(parse_mode='HTML')
@@ -82,16 +82,35 @@ def get_media_data(message: Message):
     
     return media_type, media_data
 
-async def safe_send_message(chat_id: int, text: str, **kwargs):
+async def safe_send_message(chat_id: int, text: str, parse_mode: str = 'HTML', **kwargs):
+    """Безопасная отправка сообщения с обработкой ошибок"""
     try:
-        return await bot.send_message(chat_id, text, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
-        return await bot.send_message(chat_id, text, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
     except TelegramAPIError as e:
         logger.error(f"Ошибка отправки: {e}")
+        # Если ошибка с HTML, пробуем отправить без форматирования
+        if "can't parse entities" in str(e):
+            try:
+                # Убираем все HTML-теги
+                import re
+                clean_text = re.sub(r'<[^>]+>', '', text)
+                return await bot.send_message(chat_id, clean_text, parse_mode=None, **kwargs)
+            except:
+                pass
         return None
+
+def escape_html(text: str) -> str:
+    """Экранирует спецсимволы для HTML"""
+    if not text:
+        return text
+    return (text.replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;'))
 
 # ==================== ОБРАБОТЧИКИ ====================
 
@@ -124,6 +143,7 @@ async def handle_business_connection(connection: BusinessConnection):
             [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
         ])
         
+        # Используем только безопасные теги
         await safe_send_message(
             user_id,
             f"🤖 <b>Бот подключен к бизнес-аккаунту!</b>\n\n"
@@ -193,9 +213,10 @@ async def handle_edited_business_message(message: Message):
             
             await db.save_edit(user_id, message.message_id, message.chat.id, old_text, new_text)
             
-            text = f"✏️ <b>Сообщение изменено</b>\n"
-            text += f"Было: {old_text[:200]}{'...' if len(old_text) > 200 else ''}\n"
-            text += f"Стало: {new_text[:200]}{'...' if len(new_text) > 200 else ''}"
+            # Используем только безопасные теги, экранируем текст
+            text = f"✏️ <b>Сообщение изменено</b>\n\n"
+            text += f"Было:\n<code>{escape_html(old_text[:200])}</code>\n\n"
+            text += f"Стало:\n<code>{escape_html(new_text[:200])}</code>"
             
             await safe_send_message(user_id, text)
     except Exception as e:
@@ -212,10 +233,10 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
         if old_data and old_data[0]:
             await db.mark_deleted(user_id, message.message_id, message.chat.id)
             
-            text = f"🗑️ <b>Сообщение удалено</b>\n"
-            text += f"Чат: {old_data[2] or message.chat.title or message.chat.id}\n"
-            text += f"От: {old_data[1] or 'Неизвестно'}\n"
-            text += f"Текст: {old_data[0][:300]}{'...' if len(old_data[0]) > 300 else ''}"
+            text = f"🗑️ <b>Сообщение удалено</b>\n\n"
+            text += f"Чат: {escape_html(old_data[2] or str(message.chat.id))}\n"
+            text += f"От: {escape_html(old_data[1] or 'Неизвестно')}\n"
+            text += f"Текст:\n<code>{escape_html(old_data[0][:300])}</code>"
             
             await safe_send_message(user_id, text)
     except Exception as e:
@@ -326,19 +347,19 @@ async def cmd_history(message: Message):
         
         edits = await db.get_message_edits(user_id, msg_id, message.chat.id)
         
-        text = f"📜 <b>История</b>\n"
+        text = f"📜 <b>История</b>\n\n"
         text += f"ID: {msg_id}\n"
-        text += f"Текст: {msg[0] or 'Нет текста'}\n"
+        text += f"Текст: <code>{escape_html(msg[0] or 'Нет текста')}</code>\n"
         text += f"Дата: {datetime.fromtimestamp(msg[3]).strftime('%Y-%m-%d %H:%M:%S') if msg[3] else 'Неизвестно'}\n"
         
         if msg[6] == 1:
-            text += f"❌ Удалено\n"
+            text += f"\n❌ Удалено\n"
         
         if edits:
             text += f"\n📝 <b>Изменения:</b>\n"
             for old_t, new_t, edit_d in edits[:3]:
                 text += f"• {datetime.fromtimestamp(edit_d).strftime('%H:%M')}\n"
-                text += f"  Было: {old_t[:50]}{'...' if len(old_t) > 50 else ''}\n"
+                text += f"  Было: <code>{escape_html(old_t[:50])}</code>\n"
         
         await safe_send_message(user_id, text)
     except ValueError:
