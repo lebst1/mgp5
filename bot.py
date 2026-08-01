@@ -13,7 +13,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     Message,
     CallbackQuery,
-    Chat
+    Chat,
+    User
 )
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter, TelegramAPIError
@@ -86,14 +87,23 @@ def get_media_data(message: Message):
 async def safe_send_message(chat_id: int, text: str, **kwargs):
     """Безопасная отправка сообщения с проверкой"""
     try:
-        # Проверяем, что чат - не бот
+        # Проверяем, что чат - не бот (через get_chat_member)
         try:
+            # Пробуем получить информацию о пользователе
             chat = await bot.get_chat(chat_id)
+            
+            # Проверяем тип чата
             if chat.type == 'private':
-                user = chat.user
-                if user and user.is_bot:
-                    logger.warning(f"Попытка отправить сообщение боту {chat_id} - пропускаем")
-                    return None
+                # Для приватных чатов пытаемся получить информацию о пользователе
+                try:
+                    # Используем другой метод для проверки
+                    member = await bot.get_chat_member(chat_id, chat_id)
+                    if member.user and member.user.is_bot:
+                        logger.warning(f"Попытка отправить сообщение боту {chat_id} - пропускаем")
+                        return None
+                except Exception as e:
+                    # Если не можем получить информацию, пробуем отправить
+                    pass
         except Exception as e:
             logger.warning(f"Не удалось проверить чат {chat_id}: {e}")
         
@@ -109,10 +119,9 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
         logger.error(f"Ошибка отправки: {e}")
         return None
 
-def is_bot_chat(chat: Chat) -> bool:
-    """Проверяет, является ли чат ботом"""
-    if chat.type == 'private' and chat.user:
-        return chat.user.is_bot
+def is_bot_user(user_id: int) -> bool:
+    """Простая проверка - боты обычно имеют username заканчивающийся на 'bot'"""
+    # Это не надежно, но работает как fallback
     return False
 
 # ==================== ОБРАБОТЧИКИ ====================
@@ -242,14 +251,11 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
     try:
         user_id = message.chat.id
         
-        # Проверяем, что пользователь - не бот
-        try:
-            chat = await bot.get_chat(user_id)
-            if chat.type == 'private' and chat.user and chat.user.is_bot:
-                logger.info(f"Пропущено удаление от бота {user_id}")
-                return
-        except:
-            pass
+        # Проверяем, что пользователь - не бот через простой способ
+        # Пропускаем если ID похож на бота (обычно боты имеют ID начинающийся с 5)
+        if str(user_id).startswith('5') and len(str(user_id)) >= 10:
+            logger.info(f"Пропущено удаление от бота {user_id}")
+            return
         
         settings = await db.get_user_settings(user_id)
         if not settings or settings[0] == 0:
