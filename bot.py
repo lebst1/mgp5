@@ -12,7 +12,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     Message,
-    CallbackQuery
+    CallbackQuery,
+    Chat
 )
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramRetryAfter, TelegramAPIError
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Инициализация бота - БЕЗ HTML
 bot = Bot(
     token=config.BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=None)  # Отключаем HTML
+    default=DefaultBotProperties(parse_mode=None)
 )
 dp = Dispatcher()
 
@@ -83,16 +84,36 @@ def get_media_data(message: Message):
     return media_type, media_data
 
 async def safe_send_message(chat_id: int, text: str, **kwargs):
-    """Безопасная отправка сообщения без форматирования"""
+    """Безопасная отправка сообщения с проверкой"""
     try:
+        # Проверяем, что чат - не бот
+        try:
+            chat = await bot.get_chat(chat_id)
+            if chat.type == 'private':
+                user = chat.user
+                if user and user.is_bot:
+                    logger.warning(f"Попытка отправить сообщение боту {chat_id} - пропускаем")
+                    return None
+        except Exception as e:
+            logger.warning(f"Не удалось проверить чат {chat_id}: {e}")
+        
         return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
         return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
     except TelegramAPIError as e:
+        if "can't send messages to the bot" in str(e):
+            logger.warning(f"Нельзя отправлять сообщения ботам: {chat_id}")
+            return None
         logger.error(f"Ошибка отправки: {e}")
         return None
+
+def is_bot_chat(chat: Chat) -> bool:
+    """Проверяет, является ли чат ботом"""
+    if chat.type == 'private' and chat.user:
+        return chat.user.is_bot
+    return False
 
 # ==================== ОБРАБОТЧИКИ ====================
 
@@ -100,6 +121,12 @@ async def safe_send_message(chat_id: int, text: str, **kwargs):
 async def handle_business_connection(connection: BusinessConnection):
     try:
         user_id = connection.user.id
+        
+        # Проверяем, что пользователь - не бот
+        if connection.user.is_bot:
+            logger.warning(f"Бот пытается подключиться: {user_id}")
+            return
+        
         logger.info(f"Business подключение от {user_id}")
         
         await db.register_user(
@@ -151,6 +178,11 @@ async def handle_business_message(message: Message):
         if not user_id:
             return
         
+        # Пропускаем сообщения от ботов
+        if message.from_user and message.from_user.is_bot:
+            logger.info(f"Пропущено сообщение от бота {user_id}")
+            return
+        
         user = await db.get_user(user_id)
         if not user or user[5] == 0:
             return
@@ -183,6 +215,10 @@ async def handle_edited_business_message(message: Message):
         if not user_id:
             return
         
+        # Пропускаем сообщения от ботов
+        if message.from_user and message.from_user.is_bot:
+            return
+        
         settings = await db.get_user_settings(user_id)
         if not settings or settings[1] == 0:
             return
@@ -205,6 +241,16 @@ async def handle_edited_business_message(message: Message):
 async def handle_business_message_deleted(message: InaccessibleMessage):
     try:
         user_id = message.chat.id
+        
+        # Проверяем, что пользователь - не бот
+        try:
+            chat = await bot.get_chat(user_id)
+            if chat.type == 'private' and chat.user and chat.user.is_bot:
+                logger.info(f"Пропущено удаление от бота {user_id}")
+                return
+        except:
+            pass
+        
         settings = await db.get_user_settings(user_id)
         if not settings or settings[0] == 0:
             return
@@ -227,6 +273,12 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
+    
+    # Проверяем, что пользователь - не бот
+    if message.from_user.is_bot:
+        await message.answer("❌ Боты не могут использовать этого бота.")
+        return
+    
     await db.register_user(user_id, message.from_user.username, 
                           message.from_user.first_name, message.from_user.last_name)
     
@@ -250,6 +302,10 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
+    # Проверяем, что пользователь - не бот
+    if message.from_user.is_bot:
+        return
+    
     await safe_send_message(
         message.from_user.id,
         f"❓ Помощь\n\n"
@@ -267,6 +323,11 @@ async def cmd_help(message: Message):
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
+    
+    # Проверяем, что пользователь - не бот
+    if message.from_user.is_bot:
+        return
+    
     stats = await db.get_stats(user_id)
     connections = await db.get_active_connections_count(user_id)
     
@@ -286,6 +347,11 @@ async def cmd_stats(message: Message):
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
     user_id = message.from_user.id
+    
+    # Проверяем, что пользователь - не бот
+    if message.from_user.is_bot:
+        return
+    
     settings = await db.get_user_settings(user_id)
     
     if not settings:
@@ -311,6 +377,11 @@ async def cmd_settings(message: Message):
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
     user_id = message.from_user.id
+    
+    # Проверяем, что пользователь - не бот
+    if message.from_user.is_bot:
+        return
+    
     args = message.text.split()
     
     if len(args) < 2:
@@ -350,6 +421,11 @@ async def cmd_history(message: Message):
 @dp.callback_query()
 async def handle_callbacks(callback: CallbackQuery):
     user_id = callback.from_user.id
+    
+    # Проверяем, что пользователь - не бот
+    if callback.from_user.is_bot:
+        await callback.answer("❌ Боты не могут использовать этого бота.")
+        return
     
     if callback.data == "stats":
         await cmd_stats(callback.message)
