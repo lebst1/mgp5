@@ -32,10 +32,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота - ПЕРЕНОСИМ parse_mode в DefaultBotProperties
+# Инициализация бота - БЕЗ HTML
 bot = Bot(
     token=config.BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode='HTML')
+    default=DefaultBotProperties(parse_mode=None)  # Отключаем HTML
 )
 dp = Dispatcher()
 
@@ -82,35 +82,17 @@ def get_media_data(message: Message):
     
     return media_type, media_data
 
-async def safe_send_message(chat_id: int, text: str, parse_mode: str = 'HTML', **kwargs):
-    """Безопасная отправка сообщения с обработкой ошибок"""
+async def safe_send_message(chat_id: int, text: str, **kwargs):
+    """Безопасная отправка сообщения без форматирования"""
     try:
-        return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
-        return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+        return await bot.send_message(chat_id, text, parse_mode=None, **kwargs)
     except TelegramAPIError as e:
         logger.error(f"Ошибка отправки: {e}")
-        # Если ошибка с HTML, пробуем отправить без форматирования
-        if "can't parse entities" in str(e):
-            try:
-                # Убираем все HTML-теги
-                import re
-                clean_text = re.sub(r'<[^>]+>', '', text)
-                return await bot.send_message(chat_id, clean_text, parse_mode=None, **kwargs)
-            except:
-                pass
         return None
-
-def escape_html(text: str) -> str:
-    """Экранирует спецсимволы для HTML"""
-    if not text:
-        return text
-    return (text.replace('&', '&amp;')
-                .replace('<', '&lt;')
-                .replace('>', '&gt;')
-                .replace('"', '&quot;'))
 
 # ==================== ОБРАБОТЧИКИ ====================
 
@@ -143,14 +125,13 @@ async def handle_business_connection(connection: BusinessConnection):
             [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
         ])
         
-        # Используем только безопасные теги
         await safe_send_message(
             user_id,
-            f"🤖 <b>Бот подключен к бизнес-аккаунту!</b>\n\n"
+            f"🤖 Бот подключен к бизнес-аккаунту!\n\n"
             f"✅ Сохраняю все сообщения\n"
             f"✏️ Отслеживаю изменения\n"
             f"🗑️ Сохраняю удаленные\n\n"
-            f"📌 <b>Настройки:</b>\n"
+            f"📌 Настройки:\n"
             f"• Удаления: {'✅' if settings and settings[0] else '❌'}\n"
             f"• Изменения: {'✅' if settings and settings[1] else '❌'}\n"
             f"• Медиа: {'✅' if settings and settings[2] else '❌'}",
@@ -213,10 +194,9 @@ async def handle_edited_business_message(message: Message):
             
             await db.save_edit(user_id, message.message_id, message.chat.id, old_text, new_text)
             
-            # Используем только безопасные теги, экранируем текст
-            text = f"✏️ <b>Сообщение изменено</b>\n\n"
-            text += f"Было:\n<code>{escape_html(old_text[:200])}</code>\n\n"
-            text += f"Стало:\n<code>{escape_html(new_text[:200])}</code>"
+            text = f"✏️ Сообщение изменено\n\n"
+            text += f"Было: {old_text[:200]}{'...' if len(old_text) > 200 else ''}\n\n"
+            text += f"Стало: {new_text[:200]}{'...' if len(new_text) > 200 else ''}"
             
             await safe_send_message(user_id, text)
     except Exception as e:
@@ -233,10 +213,10 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
         if old_data and old_data[0]:
             await db.mark_deleted(user_id, message.message_id, message.chat.id)
             
-            text = f"🗑️ <b>Сообщение удалено</b>\n\n"
-            text += f"Чат: {escape_html(old_data[2] or str(message.chat.id))}\n"
-            text += f"От: {escape_html(old_data[1] or 'Неизвестно')}\n"
-            text += f"Текст:\n<code>{escape_html(old_data[0][:300])}</code>"
+            text = f"🗑️ Сообщение удалено\n\n"
+            text += f"Чат: {old_data[2] or str(message.chat.id)}\n"
+            text += f"От: {old_data[1] or 'Неизвестно'}\n"
+            text += f"Текст: {old_data[0][:300]}{'...' if len(old_data[0]) > 300 else ''}"
             
             await safe_send_message(user_id, text)
     except Exception as e:
@@ -258,13 +238,13 @@ async def cmd_start(message: Message):
     
     await safe_send_message(
         user_id,
-        "🤖 <b>MGP5 Business Bot</b>\n\n"
-        "Бот сохраняет все сообщения из бизнес-аккаунта!\n\n"
-        "📌 <b>Что умеет:</b>\n"
-        "✅ Сохранять сообщения\n"
-        "✏️ Отслеживать изменения\n"
-        "🗑️ Сохранять удаленные\n\n"
-        "🔥 <b>Требуется Telegram Premium</b>",
+        f"🤖 MGP5 Business Bot\n\n"
+        f"Бот сохраняет все сообщения из бизнес-аккаунта!\n\n"
+        f"📌 Что умеет:\n"
+        f"✅ Сохранять сообщения\n"
+        f"✏️ Отслеживать изменения\n"
+        f"🗑️ Сохранять удаленные\n\n"
+        f"🔥 Требуется Telegram Premium",
         reply_markup=kb
     )
 
@@ -272,16 +252,16 @@ async def cmd_start(message: Message):
 async def cmd_help(message: Message):
     await safe_send_message(
         message.from_user.id,
-        "❓ <b>Помощь</b>\n\n"
-        "/start - главное меню\n"
-        "/stats - статистика\n"
-        "/settings - настройки\n"
-        "/history <id> - история сообщения\n"
-        "/help - помощь\n\n"
-        "🔌 <b>Как подключить:</b>\n"
-        "1. Купите Telegram Premium\n"
-        "2. Настройки → Telegram Business → Боты\n"
-        "3. Добавьте бота"
+        f"❓ Помощь\n\n"
+        f"/start - главное меню\n"
+        f"/stats - статистика\n"
+        f"/settings - настройки\n"
+        f"/history <id> - история сообщения\n"
+        f"/help - помощь\n\n"
+        f"🔌 Как подключить:\n"
+        f"1. Купите Telegram Premium\n"
+        f"2. Настройки → Telegram Business → Боты\n"
+        f"3. Добавьте бота"
     )
 
 @dp.message(Command("stats"))
@@ -294,7 +274,7 @@ async def cmd_stats(message: Message):
         await safe_send_message(user_id, "📊 Статистика пока пуста")
         return
     
-    text = f"📊 <b>Статистика</b>\n\n"
+    text = f"📊 Статистика\n\n"
     text += f"📩 Всего: {stats[0]}\n"
     text += f"🗑️ Удалено: {stats[1]}\n"
     text += f"✏️ Изменений: {stats[2]}\n"
@@ -326,7 +306,7 @@ async def cmd_settings(message: Message):
         )]
     ])
     
-    await safe_send_message(user_id, "⚙️ <b>Настройки</b>", reply_markup=kb)
+    await safe_send_message(user_id, "⚙️ Настройки", reply_markup=kb)
 
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
@@ -347,19 +327,19 @@ async def cmd_history(message: Message):
         
         edits = await db.get_message_edits(user_id, msg_id, message.chat.id)
         
-        text = f"📜 <b>История</b>\n\n"
+        text = f"📜 История\n\n"
         text += f"ID: {msg_id}\n"
-        text += f"Текст: <code>{escape_html(msg[0] or 'Нет текста')}</code>\n"
+        text += f"Текст: {msg[0] or 'Нет текста'}\n"
         text += f"Дата: {datetime.fromtimestamp(msg[3]).strftime('%Y-%m-%d %H:%M:%S') if msg[3] else 'Неизвестно'}\n"
         
         if msg[6] == 1:
             text += f"\n❌ Удалено\n"
         
         if edits:
-            text += f"\n📝 <b>Изменения:</b>\n"
+            text += f"\n📝 Изменения:\n"
             for old_t, new_t, edit_d in edits[:3]:
                 text += f"• {datetime.fromtimestamp(edit_d).strftime('%H:%M')}\n"
-                text += f"  Было: <code>{escape_html(old_t[:50])}</code>\n"
+                text += f"  Было: {old_t[:50]}{'...' if len(old_t) > 50 else ''}\n"
         
         await safe_send_message(user_id, text)
     except ValueError:
