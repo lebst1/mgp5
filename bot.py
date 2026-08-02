@@ -61,13 +61,11 @@ async def log_all_updates(update: Update):
         logger.info(f"   chat: {deleted.chat}")
         logger.info(f"   message_ids: {deleted.message_ids}")
         
-        # Обработка удаленных сообщений
         await handle_business_messages_deleted(deleted)
         return True
     
     # Обработка обычных бизнес-сообщений
     if update.message and hasattr(update.message, 'business_connection_id'):
-        # Это бизнес-сообщение, обрабатываем отдельно
         pass
     
     return True
@@ -163,32 +161,25 @@ async def show_main_menu(chat_id: int, message: Message = None):
 # ==================== ОБРАБОТЧИК УДАЛЕННЫХ СООБЩЕНИЙ (BUSINESS_MESSAGES_DELETED) ====================
 
 async def handle_business_messages_deleted(deleted: BusinessMessagesDeleted):
-    """
-    ОСНОВНОЙ ОБРАБОТЧИК УДАЛЕННЫХ СООБЩЕНИЙ
-    Это событие приходит, когда пользователь удаляет сообщение в личном чате
-    """
+    """Обработчик удаленных сообщений из Business API"""
     try:
         user_id = deleted.chat.id
         msg_ids = deleted.message_ids
         
         logger.info(f"🗑️ ОБРАБОТКА УДАЛЕННЫХ СООБЩЕНИЙ: {msg_ids} от пользователя {user_id}")
         
-        # Получаем настройки пользователя
         settings = await db.get_user_settings(user_id)
         if not settings or settings[0] == 0:
             logger.info(f"ℹ️ Уведомления об удалении выключены для {user_id}")
             return
         
-        # Обрабатываем каждое удаленное сообщение
         for msg_id in msg_ids:
             logger.info(f"   ➜ Обработка msg_id: {msg_id}")
             
-            # Ищем сообщение в БД
             old_data = await db.get_message(user_id, msg_id, deleted.chat.id)
             
             if not old_data:
                 logger.warning(f"⚠️ Сообщение {msg_id} не найдено в БД для user_id={user_id}")
-                # Пробуем найти без user_id
                 try:
                     async with aiosqlite.connect(db.db_path) as conn:
                         cursor = await conn.execute(
@@ -202,10 +193,8 @@ async def handle_business_messages_deleted(deleted: BusinessMessagesDeleted):
                     logger.error(f"Ошибка поиска в БД: {e}")
             
             if old_data:
-                # Отмечаем как удаленное в БД
                 await db.mark_deleted(user_id, msg_id, deleted.chat.id)
                 
-                # Формируем уведомление
                 text = f"🗑️ Сообщение удалено\n\n"
                 text += f"Чат: {old_data[2] or str(deleted.chat.id)}\n"
                 text += f"От: {old_data[1] or 'Неизвестно'}\n"
@@ -216,16 +205,78 @@ async def handle_business_messages_deleted(deleted: BusinessMessagesDeleted):
                 logger.info(f"✅ Уведомление об удалении отправлено для msg_id={msg_id}")
             else:
                 logger.warning(f"⚠️ Сообщение {msg_id} НЕ НАЙДЕНО в БД")
-                # Отправляем уведомление, что сообщение было удалено, но не сохранено
                 await safe_send_message(
                     user_id,
                     f"🗑️ Сообщение было удалено, но не сохранено (ID: {msg_id})\n"
                     f"Возможно, оно было отправлено слишком быстро или это сообщение от бота."
                 )
-                logger.info(f"✅ Отправлено уведомление о неудачном сохранении для msg_id={msg_id}")
                 
     except Exception as e:
         logger.error(f"❌ Ошибка в handle_business_messages_deleted: {e}", exc_info=True)
+
+# ==================== КОСТЫЛЬ: ПРОВЕРКА УДАЛЕННЫХ СООБЩЕНИЙ ====================
+
+async def check_deleted_messages():
+    """
+    Периодическая проверка удаленных сообщений
+    (костыль, если BusinessMessagesDeleted не приходит)
+    """
+    logger.info("🔄 Запущен фоновый процесс проверки удаленных сообщений")
+    
+    while True:
+        try:
+            # Проверяем сообщения, которым больше 30 секунд
+            # и они не отмечены как удаленные
+            async with aiosqlite.connect(db.db_path) as conn:
+                cursor = await conn.execute(
+                    "SELECT id, chat_id, user_id, text, sender_name, chat_title FROM messages WHERE is_deleted = 0 AND date < ?",
+                    (int(datetime.now().timestamp()) - 30,)
+                )
+                messages = await cursor.fetchall()
+                
+                if messages:
+                    logger.info(f"🔍 Проверка {len(messages)} сообщений на удаление")
+                
+                for msg_id, chat_id, user_id, text, sender_name, chat_title in messages:
+                    try:
+                        # Пытаемся получить сообщение через API
+                        await bot.get_messages(chat_id, msg_id)
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "message not found" in error_msg or "not found" in error_msg:
+                            # Сообщение удалено!
+                            logger.info(f"🗑️ Обнаружено удаленное сообщение (костыль): {msg_id} в чате {chat_id}")
+                            
+                            await db.mark_deleted(user_id, msg_id, chat_id)
+                            
+                            # Проверяем настройки
+                            settings = await db.get_user_settings(user_id)
+                            if settings and settings[0] != 0:
+                                # Отправляем уведомление
+                                notification = f"🗑️ Сообщение удалено\n\n"
+                                notification += f"Чат: {chat_title or str(chat_id)}\n"
+                                notification += f"От: {sender_name or 'Неизвестно'}\n"
+                                notification += f"Текст: {text[:300]}{'...' if len(text) > 300 else ''}"
+                                
+                                await safe_send_message(user_id, notification)
+                                logger.info(f"✅ Отправлено уведомление об удалении для {user_id} (костыль)")
+                        elif "message is not accessible" in error_msg:
+                            # Сообщение недоступно (может быть удалено)
+                            logger.info(f"🔒 Сообщение {msg_id} недоступно, возможно удалено")
+                            await db.mark_deleted(user_id, msg_id, chat_id)
+                        else:
+                            # Другая ошибка
+                            if "bot" not in error_msg and "flood" not in error_msg:
+                                logger.warning(f"⚠️ Ошибка при проверке сообщения {msg_id}: {e}")
+                    
+                    # Небольшая задержка между проверками
+                    await asyncio.sleep(0.2)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в check_deleted_messages: {e}", exc_info=True)
+        
+        # Ждем 30 секунд до следующей проверки
+        await asyncio.sleep(30)
 
 # ==================== ОБРАБОТЧИКИ BUSINESS API ====================
 
@@ -268,11 +319,8 @@ async def handle_business_message(message: Message):
         logger.info(f"   type={type(message).__name__}")
         logger.info(f"   is_inaccessible={isinstance(message, InaccessibleMessage)}")
         
-        # Проверяем, является ли сообщение недоступным (удаленным)
-        # В некоторых случаях удаленные сообщения приходят как InaccessibleMessage
         if isinstance(message, InaccessibleMessage):
             logger.info(f"🗑️ ОБНАРУЖЕНО УДАЛЕННОЕ СООБЩЕНИЕ (InaccessibleMessage): {message.message_id}")
-            # Это уже обрабатывается через BusinessMessagesDeleted, но на всякий случай
             return
         
         user_id = message.from_user.id if message.from_user else None
@@ -381,7 +429,10 @@ async def cmd_help(message: Message):
         f"🔌 Как подключить:\n"
         f"1. Купите Telegram Premium\n"
         f"2. Настройки → Telegram Business → Боты\n"
-        f"3. Добавьте бота"
+        f"3. Добавьте бота\n\n"
+        f"⚠️ Для работы удалений:\n"
+        f"- Бот должен быть в Business Mode (@BotFather)\n"
+        f"- Дай доступ к чатам в настройках Business"
     )
     
     await safe_send_message(user_id, text, reply_markup=kb)
@@ -581,7 +632,12 @@ async def main():
     logger.info("=" * 80)
     logger.info("📌 Ожидаем подключений...")
     logger.info("📌 Удаленные сообщения будут приходить как BusinessMessagesDeleted")
+    logger.info("📌 Также запущен фоновый процесс проверки удалений (костыль)")
     logger.info("=" * 80)
+    
+    # ЗАПУСКАЕМ ФОНОВЫЙ ПРОЦЕСС ПРОВЕРКИ УДАЛЕНИЙ
+    asyncio.create_task(check_deleted_messages())
+    logger.info("✅ Фоновый процесс проверки удалений запущен")
     
     try:
         await dp.start_polling(bot)
