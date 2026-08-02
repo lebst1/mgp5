@@ -89,7 +89,6 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
     """Безопасная отправка сообщения"""
     try:
         msg = await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
-        # Сохраняем ID сообщения для пользователя
         if chat_id not in user_messages:
             user_messages[chat_id] = {}
         user_messages[chat_id]['last_message'] = msg.message_id
@@ -108,21 +107,6 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
             return None
         logger.error(f"Ошибка отправки: {e}")
         return None
-
-async def safe_edit_message(chat_id: int, message_id: int, text: str, reply_markup=None):
-    """Безопасное редактирование сообщения"""
-    try:
-        return await bot.edit_message_text(
-            text, 
-            chat_id=chat_id, 
-            message_id=message_id,
-            parse_mode=None,
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        logger.error(f"Ошибка редактирования: {e}")
-        # Если не удалось отредактировать, отправляем новое
-        return await safe_send_message(chat_id, text, reply_markup)
 
 async def show_main_menu(chat_id: int, message: Message = None):
     """Показать главное меню"""
@@ -173,8 +157,9 @@ async def handle_business_connection(connection: BusinessConnection):
             is_premium=True
         )
         
+        # ИСПРАВЛЕНО: connection.id вместо connection.connection_id
         await db.save_connection(
-            connection.connection_id,
+            connection.id,  # <--- ИЗМЕНЕНО
             user_id,
             f"{connection.user.first_name or ''} {connection.user.last_name or ''}".strip(),
             connection.can_reply
@@ -429,7 +414,6 @@ async def callback_menu_start(callback: CallbackQuery):
 @dp.callback_query(F.data == "menu_stats")
 async def callback_menu_stats(callback: CallbackQuery):
     await callback.answer("📊 Статистика")
-    # Создаем фейковое сообщение для cmd_stats
     class FakeMessage:
         def __init__(self, user_id, chat_id):
             self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
@@ -481,7 +465,6 @@ async def callback_toggle(callback: CallbackQuery):
         await db.update_user_settings(user_id, **{db_field: new_value})
         
         await callback.answer(f"✅ {'Включено' if new_value else 'Выключено'}!")
-        # Обновляем меню настроек
         class FakeMessage:
             def __init__(self, user_id, chat_id):
                 self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
