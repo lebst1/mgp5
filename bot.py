@@ -25,7 +25,7 @@ from database import db
 
 # Настройка логирования
 logging.basicConfig(
-    level=getattr(logging, config.LOG_LEVEL),
+    level=logging.DEBUG,  # Меняем на DEBUG для максимальной детализации
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(config.LOG_FILE),
@@ -41,15 +41,36 @@ bot = Bot(
 )
 dp = Dispatcher()
 
-# Хранилище сообщений для редактирования
-user_messages: Dict[int, Dict[str, Any]] = {}
-
-# ==================== ДИАГНОСТИКА ====================
+# ==================== ПРИНУДИТЕЛЬНОЕ ЛОГИРОВАНИЕ ВСЕХ ОБНОВЛЕНИЙ ====================
 
 @dp.update()
 async def log_all_updates(update: Update):
-    """Логирование всех входящих обновлений для диагностики"""
-    logger.info(f"📥 Получено обновление: {update}")
+    """ЛОГИРОВАНИЕ ВСЕХ ВХОДЯЩИХ ОБНОВЛЕНИЙ - ЭТО САМОЕ ВАЖНОЕ"""
+    logger.info("=" * 80)
+    logger.info(f"📥 ПОЛУЧЕНО ОБНОВЛЕНИЕ ТИПА: {type(update).__name__}")
+    logger.info(f"📥 ПОЛНЫЙ ОБЪЕКТ: {update}")
+    logger.info("=" * 80)
+    
+    # Если есть сообщение - логируем его
+    if update.message:
+        logger.info(f"📩 Message: id={update.message.message_id}, chat={update.message.chat.id}")
+        logger.info(f"   text={update.message.text}")
+        logger.info(f"   is_inaccessible={isinstance(update.message, InaccessibleMessage)}")
+    
+    # Если есть редактирование
+    if update.edited_message:
+        logger.info(f"✏️ Edited message: id={update.edited_message.message_id}")
+    
+    # Если есть бизнес-подключение
+    if update.business_connection:
+        logger.info(f"🔗 Business connection: {update.business_connection}")
+    
+    # Если есть удаленные сообщения (важно!)
+    if update.business_messages_deleted:
+        logger.info(f"🗑️ УДАЛЕННЫЕ СООБЩЕНИЯ: {update.business_messages_deleted}")
+        logger.info(f"   chat_id: {update.business_messages_deleted.chat.id}")
+        logger.info(f"   message_ids: {update.business_messages_deleted.message_ids}")
+    
     return True
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
@@ -99,18 +120,12 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
     """Безопасная отправка сообщения"""
     try:
         msg = await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
-        if chat_id not in user_messages:
-            user_messages[chat_id] = {}
-        user_messages[chat_id]['last_message'] = msg.message_id
+        logger.info(f"✅ Отправлено сообщение в {chat_id}")
         return msg
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
-        msg = await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
-        if chat_id not in user_messages:
-            user_messages[chat_id] = {}
-        user_messages[chat_id]['last_message'] = msg.message_id
-        return msg
+        return await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
     except TelegramAPIError as e:
         if "can't send messages to the bot" in str(e):
             logger.warning(f"Нельзя отправлять сообщения ботам: {chat_id}")
@@ -152,12 +167,13 @@ async def show_main_menu(chat_id: int, message: Message = None):
 async def handle_business_connection(connection: BusinessConnection):
     try:
         user_id = connection.user.id
+        logger.info(f"🔗 Business подключение от {user_id}")
+        logger.info(f"   user: {connection.user}")
+        logger.info(f"   can_reply: {connection.can_reply}")
         
         if connection.user.is_bot:
-            logger.warning(f"Бот пытается подключиться: {user_id}")
+            logger.warning(f"⚠️ Бот пытается подключиться: {user_id}")
             return
-        
-        logger.info(f"Business подключение от {user_id}")
         
         await db.register_user(
             user_id,
@@ -175,21 +191,20 @@ async def handle_business_connection(connection: BusinessConnection):
         )
         
         await show_main_menu(user_id)
+        logger.info(f"✅ Бизнес-подключение завершено для {user_id}")
     except Exception as e:
-        logger.error(f"Ошибка business_connection: {e}")
+        logger.error(f"❌ Ошибка business_connection: {e}", exc_info=True)
 
 @dp.message(F.business_connection_id)
 async def handle_business_message(message: Message):
     try:
-        # ДИАГНОСТИКА: логируем все бизнес-сообщения
-        logger.info(f"📥 Business message: type={type(message).__name__}, id={message.message_id}, chat={message.chat.id}")
+        logger.info(f"📩 Business message: id={message.message_id}, chat={message.chat.id}")
+        logger.info(f"   type={type(message).__name__}")
         logger.info(f"   is_inaccessible={isinstance(message, InaccessibleMessage)}")
-        logger.info(f"   has_text={bool(message.text)}")
-        logger.info(f"   has_caption={bool(message.caption)}")
         
         # Проверяем, является ли сообщение недоступным (удаленным)
         if isinstance(message, InaccessibleMessage):
-            logger.info(f"🗑️ Обнаружено удаленное сообщение: {message.message_id} в чате {message.chat.id}")
+            logger.info(f"🗑️ ОБНАРУЖЕНО УДАЛЕННОЕ СООБЩЕНИЕ: {message.message_id} в чате {message.chat.id}")
             await handle_business_message_deleted(message)
             return
         
@@ -224,13 +239,15 @@ async def handle_business_message(message: Message):
         
         connection_id = getattr(message, 'business_connection_id', None)
         await db.save_message(user_id, message_data, connection_id)
-        logger.info(f"✅ Сохранено сообщение {message.message_id} от {user_id}")
+        logger.info(f"✅ СОХРАНЕНО сообщение {message.message_id} от {user_id}")
     except Exception as e:
         logger.error(f"❌ Ошибка business_message: {e}", exc_info=True)
 
 @dp.edited_message(F.business_connection_id)
 async def handle_edited_business_message(message: Message):
     try:
+        logger.info(f"✏️ Edited message: id={message.message_id}")
+        
         user_id = message.from_user.id if message.from_user else None
         if not user_id:
             return
@@ -240,6 +257,7 @@ async def handle_edited_business_message(message: Message):
         
         settings = await db.get_user_settings(user_id)
         if not settings or settings[1] == 0:
+            logger.info(f"ℹ️ Уведомления об изменениях выключены для {user_id}")
             return
         
         old_data = await db.get_message(user_id, message.message_id, message.chat.id)
@@ -254,22 +272,23 @@ async def handle_edited_business_message(message: Message):
             text += f"Стало: {new_text[:200]}{'...' if len(new_text) > 200 else ''}"
             
             await safe_send_message(user_id, text)
+            logger.info(f"✅ Отправлено уведомление об изменении для {user_id}")
     except Exception as e:
-        logger.error(f"Ошибка edited_message: {e}")
+        logger.error(f"❌ Ошибка edited_message: {e}", exc_info=True)
 
 async def handle_business_message_deleted(message: InaccessibleMessage):
     try:
         user_id = message.chat.id
         msg_id = message.message_id
         
-        logger.info(f"🗑️ Обработка удаленного сообщения: msg_id={msg_id}, chat_id={user_id}")
+        logger.info(f"🗑️ ОБРАБОТКА УДАЛЕННОГО СООБЩЕНИЯ: msg_id={msg_id}, chat_id={user_id}")
         
         # Ищем сообщение в БД
         old_data = await db.get_message(user_id, msg_id, message.chat.id)
         
         if not old_data:
-            logger.warning(f"⚠️ Сообщение {msg_id} не найдено в БД (возможно, не успело сохраниться)")
-            # Пробуем найти по chat_id и message_id без user_id
+            logger.warning(f"⚠️ Сообщение {msg_id} не найдено в БД для user_id={user_id}")
+            # Пробуем найти без user_id
             try:
                 async with aiosqlite.connect(db.db_path) as conn:
                     cursor = await conn.execute(
@@ -297,8 +316,9 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
             
             logger.info(f"📤 Отправка уведомления об удалении для {user_id}")
             await safe_send_message(user_id, text)
+            logger.info(f"✅ Уведомление об удалении отправлено")
         else:
-            logger.warning(f"⚠️ Сообщение {msg_id} не найдено в БД")
+            logger.warning(f"⚠️ Сообщение {msg_id} НЕ НАЙДЕНО в БД")
             # Отправляем уведомление, что сообщение было удалено, но не сохранено
             settings = await db.get_user_settings(user_id)
             if settings and settings[0] != 0:
@@ -307,6 +327,7 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
                     f"🗑️ Сообщение было удалено, но не сохранено (ID: {msg_id})\n"
                     f"Возможно, оно было отправлено слишком быстро или это сообщение от бота."
                 )
+                logger.info(f"✅ Отправлено уведомление о неудачном сохранении")
     except Exception as e:
         logger.error(f"❌ Ошибка deleted_message: {e}", exc_info=True)
 
@@ -315,6 +336,7 @@ async def handle_business_message_deleted(message: InaccessibleMessage):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
+    logger.info(f"📋 Команда /start от {user_id}")
     
     if message.from_user.is_bot:
         await message.answer("❌ Боты не могут использовать этого бота.")
@@ -327,6 +349,9 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
+    user_id = message.from_user.id
+    logger.info(f"📋 Команда /help от {user_id}")
+    
     if message.from_user.is_bot:
         return
     
@@ -347,11 +372,12 @@ async def cmd_help(message: Message):
         f"3. Добавьте бота"
     )
     
-    await safe_send_message(message.from_user.id, text, reply_markup=kb)
+    await safe_send_message(user_id, text, reply_markup=kb)
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     user_id = message.from_user.id
+    logger.info(f"📋 Команда /stats от {user_id}")
     
     if message.from_user.is_bot:
         return
@@ -379,6 +405,7 @@ async def cmd_stats(message: Message):
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
     user_id = message.from_user.id
+    logger.info(f"📋 Команда /settings от {user_id}")
     
     if message.from_user.is_bot:
         return
@@ -409,6 +436,7 @@ async def cmd_settings(message: Message):
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
     user_id = message.from_user.id
+    logger.info(f"📋 Команда /history от {user_id}")
     
     if message.from_user.is_bot:
         return
@@ -455,11 +483,13 @@ async def cmd_history(message: Message):
 
 @dp.callback_query(F.data == "menu_start")
 async def callback_menu_start(callback: CallbackQuery):
+    logger.info(f"📋 Callback menu_start от {callback.from_user.id}")
     await callback.answer("📋 Главное меню")
     await show_main_menu(callback.from_user.id, callback.message)
 
 @dp.callback_query(F.data == "menu_stats")
 async def callback_menu_stats(callback: CallbackQuery):
+    logger.info(f"📋 Callback menu_stats от {callback.from_user.id}")
     await callback.answer("📊 Статистика")
     class FakeMessage:
         def __init__(self, user_id, chat_id):
@@ -471,6 +501,7 @@ async def callback_menu_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_settings")
 async def callback_menu_settings(callback: CallbackQuery):
+    logger.info(f"📋 Callback menu_settings от {callback.from_user.id}")
     await callback.answer("⚙️ Настройки")
     class FakeMessage:
         def __init__(self, user_id, chat_id):
@@ -482,6 +513,7 @@ async def callback_menu_settings(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_help")
 async def callback_menu_help(callback: CallbackQuery):
+    logger.info(f"📋 Callback menu_help от {callback.from_user.id}")
     await callback.answer("❓ Помощь")
     class FakeMessage:
         def __init__(self, user_id, chat_id):
@@ -495,6 +527,8 @@ async def callback_menu_help(callback: CallbackQuery):
 async def callback_toggle(callback: CallbackQuery):
     user_id = callback.from_user.id
     setting = callback.data.replace("toggle_", "")
+    
+    logger.info(f"📋 Callback toggle_{setting} от {user_id}")
     
     settings = await db.get_user_settings(user_id)
     if not settings:
@@ -523,18 +557,27 @@ async def callback_toggle(callback: CallbackQuery):
 # ==================== ЗАПУСК ====================
 
 async def main():
-    logger.info("🚀 Запуск MGP5 Business Bot...")
+    logger.info("=" * 80)
+    logger.info("🚀 ЗАПУСК MGP5 BUSINESS BOT")
+    logger.info("=" * 80)
     
     await db.init_database()
+    logger.info("✅ База данных инициализирована")
     
     bot_info = await bot.get_me()
-    logger.info(f"Бот: @{bot_info.username}")
-    logger.info("Ожидаем подключений...")
+    logger.info(f"✅ Бот: @{bot_info.username} (ID: {bot_info.id})")
+    logger.info("=" * 80)
+    logger.info("📌 Ожидаем подключений...")
+    logger.info("📌 Если удаленные сообщения не приходят - проверь:")
+    logger.info("   1. Настройки → Telegram Business → Боты")
+    logger.info("   2. Бот должен быть в списке с доступом к чатам")
+    logger.info("   3. Сообщение должно быть отправлено ПОСЛЕ подключения бота")
+    logger.info("=" * 80)
     
     try:
         await dp.start_polling(bot)
     except KeyboardInterrupt:
-        logger.info("Бот остановлен")
+        logger.info("⏹️ Бот остановлен")
 
 if __name__ == '__main__':
     asyncio.run(main())
