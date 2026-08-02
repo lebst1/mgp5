@@ -3,7 +3,7 @@ import logging
 import sys
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import (
@@ -38,6 +38,9 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=None)
 )
 dp = Dispatcher()
+
+# Хранилище сообщений для редактирования
+user_messages: Dict[int, Dict[str, Any]] = {}
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
@@ -85,11 +88,20 @@ def get_media_data(message: Message):
 async def safe_send_message(chat_id: int, text: str, reply_markup=None):
     """Безопасная отправка сообщения"""
     try:
-        return await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+        msg = await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+        # Сохраняем ID сообщения для пользователя
+        if chat_id not in user_messages:
+            user_messages[chat_id] = {}
+        user_messages[chat_id]['last_message'] = msg.message_id
+        return msg
     except TelegramRetryAfter as e:
         logger.warning(f"Flood wait: {e.retry_after} seconds")
         await asyncio.sleep(e.retry_after)
-        return await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+        msg = await bot.send_message(chat_id, text, parse_mode=None, reply_markup=reply_markup)
+        if chat_id not in user_messages:
+            user_messages[chat_id] = {}
+        user_messages[chat_id]['last_message'] = msg.message_id
+        return msg
     except TelegramAPIError as e:
         if "can't send messages to the bot" in str(e):
             logger.warning(f"Нельзя отправлять сообщения ботам: {chat_id}")
@@ -97,13 +109,48 @@ async def safe_send_message(chat_id: int, text: str, reply_markup=None):
         logger.error(f"Ошибка отправки: {e}")
         return None
 
-async def safe_edit_message(text: str, message: Message, reply_markup=None):
+async def safe_edit_message(chat_id: int, message_id: int, text: str, reply_markup=None):
     """Безопасное редактирование сообщения"""
     try:
-        return await message.edit_text(text, parse_mode=None, reply_markup=reply_markup)
+        return await bot.edit_message_text(
+            text, 
+            chat_id=chat_id, 
+            message_id=message_id,
+            parse_mode=None,
+            reply_markup=reply_markup
+        )
     except Exception as e:
         logger.error(f"Ошибка редактирования: {e}")
-        return None
+        # Если не удалось отредактировать, отправляем новое
+        return await safe_send_message(chat_id, text, reply_markup)
+
+async def show_main_menu(chat_id: int, message: Message = None):
+    """Показать главное меню"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="menu_stats")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="menu_help")]
+    ])
+    
+    text = (
+        f"🤖 MGP5 Business Bot\n\n"
+        f"Бот сохраняет все сообщения из бизнес-аккаунта!\n\n"
+        f"📌 Что умеет:\n"
+        f"✅ Сохранять сообщения\n"
+        f"✏️ Отслеживать изменения\n"
+        f"🗑️ Сохранять удаленные\n\n"
+        f"🔥 Требуется Telegram Premium\n\n"
+        f"Нажмите на кнопку ниже:"
+    )
+    
+    if message:
+        try:
+            await message.edit_text(text, reply_markup=kb, parse_mode=None)
+            return
+        except:
+            pass
+    
+    return await safe_send_message(chat_id, text, reply_markup=kb)
 
 # ==================== ОБРАБОТЧИКИ BUSINESS API ====================
 
@@ -133,26 +180,7 @@ async def handle_business_connection(connection: BusinessConnection):
             connection.can_reply
         )
         
-        settings = await db.get_user_settings(user_id)
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-            [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-            [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
-        ])
-        
-        await safe_send_message(
-            user_id,
-            f"🤖 Бот подключен к бизнес-аккаунту!\n\n"
-            f"✅ Сохраняю все сообщения\n"
-            f"✏️ Отслеживаю изменения\n"
-            f"🗑️ Сохраняю удаленные\n\n"
-            f"📌 Настройки:\n"
-            f"• Удаления: {'✅' if settings and settings[0] else '❌'}\n"
-            f"• Изменения: {'✅' if settings and settings[1] else '❌'}\n"
-            f"• Медиа: {'✅' if settings and settings[2] else '❌'}",
-            reply_markup=kb
-        )
+        await show_main_menu(user_id)
     except Exception as e:
         logger.error(f"Ошибка business_connection: {e}")
 
@@ -263,24 +291,7 @@ async def cmd_start(message: Message):
     await db.register_user(user_id, message.from_user.username, 
                           message.from_user.first_name, message.from_user.last_name)
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="help")]
-    ])
-    
-    await safe_send_message(
-        user_id,
-        f"🤖 MGP5 Business Bot\n\n"
-        f"Бот сохраняет все сообщения из бизнес-аккаунта!\n\n"
-        f"📌 Что умеет:\n"
-        f"✅ Сохранять сообщения\n"
-        f"✏️ Отслеживать изменения\n"
-        f"🗑️ Сохранять удаленные\n\n"
-        f"🔥 Требуется Telegram Premium\n\n"
-        f"Нажмите на кнопку ниже, чтобы перейти в меню:",
-        reply_markup=kb
-    )
+    await show_main_menu(user_id, message)
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -288,13 +299,10 @@ async def cmd_help(message: Message):
         return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu_start")]
     ])
     
-    await safe_send_message(
-        message.from_user.id,
+    text = (
         f"❓ Помощь\n\n"
         f"/start - главное меню\n"
         f"/stats - статистика\n"
@@ -304,9 +312,10 @@ async def cmd_help(message: Message):
         f"🔌 Как подключить:\n"
         f"1. Купите Telegram Premium\n"
         f"2. Настройки → Telegram Business → Боты\n"
-        f"3. Добавьте бота",
-        reply_markup=kb
+        f"3. Добавьте бота"
     )
+    
+    await safe_send_message(message.from_user.id, text, reply_markup=kb)
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
@@ -330,7 +339,7 @@ async def cmd_stats(message: Message):
     text += f"🔗 Чатов: {connections}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu_start")]
     ])
     
     await safe_send_message(user_id, text, reply_markup=kb)
@@ -360,7 +369,7 @@ async def cmd_settings(message: Message):
             text=f"{'✅' if settings[2] else '❌'} Медиа",
             callback_data="toggle_media"
         )],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu_start")]
     ])
     
     await safe_send_message(user_id, "⚙️ Настройки\n\nВыберите что хотите настроить:", reply_markup=kb)
@@ -403,7 +412,7 @@ async def cmd_history(message: Message):
                 text += f"  Было: {old_t[:50]}{'...' if len(old_t) > 50 else ''}\n"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="start")]
+            [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu_start")]
         ])
         
         await safe_send_message(user_id, text, reply_markup=kb)
@@ -412,25 +421,44 @@ async def cmd_history(message: Message):
 
 # ==================== CALLBACKS ====================
 
-@dp.callback_query(F.data == "stats")
-async def callback_stats(callback: CallbackQuery):
-    await callback.answer()
-    await cmd_stats(callback.message)
+@dp.callback_query(F.data == "menu_start")
+async def callback_menu_start(callback: CallbackQuery):
+    await callback.answer("📋 Главное меню")
+    await show_main_menu(callback.from_user.id, callback.message)
 
-@dp.callback_query(F.data == "settings")
-async def callback_settings(callback: CallbackQuery):
-    await callback.answer()
-    await cmd_settings(callback.message)
+@dp.callback_query(F.data == "menu_stats")
+async def callback_menu_stats(callback: CallbackQuery):
+    await callback.answer("📊 Статистика")
+    # Создаем фейковое сообщение для cmd_stats
+    class FakeMessage:
+        def __init__(self, user_id, chat_id):
+            self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
+            self.chat = type('obj', (object,), {'id': chat_id})()
+            self.text = "/stats"
+    fake_msg = FakeMessage(callback.from_user.id, callback.message.chat.id)
+    await cmd_stats(fake_msg)
 
-@dp.callback_query(F.data == "help")
-async def callback_help(callback: CallbackQuery):
-    await callback.answer()
-    await cmd_help(callback.message)
+@dp.callback_query(F.data == "menu_settings")
+async def callback_menu_settings(callback: CallbackQuery):
+    await callback.answer("⚙️ Настройки")
+    class FakeMessage:
+        def __init__(self, user_id, chat_id):
+            self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
+            self.chat = type('obj', (object,), {'id': chat_id})()
+            self.text = "/settings"
+    fake_msg = FakeMessage(callback.from_user.id, callback.message.chat.id)
+    await cmd_settings(fake_msg)
 
-@dp.callback_query(F.data == "start")
-async def callback_start(callback: CallbackQuery):
-    await callback.answer()
-    await cmd_start(callback.message)
+@dp.callback_query(F.data == "menu_help")
+async def callback_menu_help(callback: CallbackQuery):
+    await callback.answer("❓ Помощь")
+    class FakeMessage:
+        def __init__(self, user_id, chat_id):
+            self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
+            self.chat = type('obj', (object,), {'id': chat_id})()
+            self.text = "/help"
+    fake_msg = FakeMessage(callback.from_user.id, callback.message.chat.id)
+    await cmd_help(fake_msg)
 
 @dp.callback_query(F.data.startswith("toggle_"))
 async def callback_toggle(callback: CallbackQuery):
@@ -453,7 +481,14 @@ async def callback_toggle(callback: CallbackQuery):
         await db.update_user_settings(user_id, **{db_field: new_value})
         
         await callback.answer(f"✅ {'Включено' if new_value else 'Выключено'}!")
-        await cmd_settings(callback.message)
+        # Обновляем меню настроек
+        class FakeMessage:
+            def __init__(self, user_id, chat_id):
+                self.from_user = type('obj', (object,), {'id': user_id, 'is_bot': False})()
+                self.chat = type('obj', (object,), {'id': chat_id})()
+                self.text = "/settings"
+        fake_msg = FakeMessage(user_id, callback.message.chat.id)
+        await cmd_settings(fake_msg)
 
 # ==================== ЗАПУСК ====================
 
